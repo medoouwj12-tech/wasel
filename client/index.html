@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>واصل | نظام نقل وحضور الطلاب الذكي</title>
+    
+    <!-- Meta tags for PWA and Mobile Experience -->
+    <meta name="theme-color" content="#2563eb" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="واصل للطلاب" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="واصل للطلاب" />
+    <meta name="description" content="تطبيق واصل لنقل وحجز وحضور الطلاب يومياً - رحلات ذكية ومتابعة لحظية" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- Google Font: Cairo -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+
+    <!-- PWA Manifest & Icons -->
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans antialiased selection:bg-blue-500 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+    
+    <!-- Service Worker Registration -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then((reg) => console.log('SW Registered:', reg.scope))
+            .catch((err) => console.log('SW Registration failed:', err));
+        });
+      }
+    </script>
+  </body>
+</html>

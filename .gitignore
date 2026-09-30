@@ -1,0 +1,12 @@
+node_modules/
+client/node_modules/
+client/dist/
+.env
+.env.*
+!.env.example
+server/database/transport.db
+server/database/transport.db-shm
+server/database/transport.db-wal
+data/
+*.log
+*.bak
