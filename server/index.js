@@ -1,12 +1,15 @@
 require('dotenv').config();
+// Vercel reserves the TZ environment variable, so configure Node's runtime timezone
+// through an app-specific setting before loading code that reads local dates.
+process.env.TZ = process.env.APP_TIME_ZONE || 'Africa/Cairo';
 
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
-const { initSchema } = require('./database/schema');
-const { getTodayString, getOrCreateCycle, closeExpiredCycles } = require('./services/dailyOperationsService');
+const { initSchema } = require('./database/postgresSchema');
+const { getTodayString, getOrCreateCycle, closeExpiredCycles } = require('./services/dailyOperationsService.pg');
 const { queryAll, queryOne } = require('./database/db');
 
 // Route modules
@@ -26,20 +29,16 @@ if (process.env.NODE_ENV === 'production') {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
     throw new Error('Production requires JWT_SECRET with at least 32 characters.');
   }
-  if (!process.env.DATABASE_PATH) {
-    throw new Error('Production requires DATABASE_PATH pointing to a persistent database volume.');
-  }
-  if (!process.env.TZ) {
-    console.warn('TZ is not set. Configure the server timezone (for example Africa/Cairo) to keep trip times consistent.');
+  if (!process.env.DATABASE_URL) {
+    throw new Error('Production requires DATABASE_URL for the Supabase PostgreSQL Transaction Pooler.');
   }
 }
 if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
 
-// Initialize database schema
-initSchema();
-
-// Ensure today's cycle exists on server boot
-getOrCreateCycle(getTodayString());
+// Verify the deployed Supabase schema, then prepare the current operations cycle.
+const ready = initSchema()
+  .then(() => getOrCreateCycle(getTodayString()))
+  .then(() => closeExpiredCycles());
 
 // Middlewares
 app.use(express.json({ limit: '1mb' }));
@@ -61,6 +60,10 @@ app.use(cors({
   },
 }));
 
+app.use((req, res, next) => {
+  ready.then(() => next()).catch(next);
+});
+
 // Request logger
 app.use((req, res, next) => {
   console.log(`[${new Date().toLocaleTimeString('ar-EG')}] ${req.method} ${req.path}`);
@@ -74,22 +77,22 @@ app.use('/api/driver', driverRoutes);
 app.use('/api/admin', adminRoutes);
 
 // Public Information endpoint (for login / register pickup selection & branding)
-app.get('/api/public/info', (req, res) => {
+app.get('/api/public/info', async (req, res) => {
   try {
-    const settingsRows = queryAll('SELECT key, value FROM settings');
+    const settingsRows = await queryAll('SELECT key, value FROM settings');
     const settings = {};
     settingsRows.forEach((r) => {
       settings[r.key] = r.value;
     });
 
-    const routes = queryAll('SELECT id, name, start_location, end_location FROM routes WHERE is_active = 1');
-    const fullRoutes = routes.map((r) => ({
+    const routes = await queryAll('SELECT id, name, start_location, end_location FROM routes WHERE is_active = 1');
+    const fullRoutes = await Promise.all(routes.map(async (r) => ({
       ...r,
-      pickup_points: queryAll(
+      pickup_points: await queryAll(
         'SELECT id, name, sequence_order, expected_time_offset_min FROM pickup_points WHERE route_id = ? ORDER BY sequence_order ASC',
         [r.id]
       ),
-    }));
+    })));
 
     return res.json({
       success: true,
@@ -133,13 +136,13 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  closeExpiredCycles();
-  const cycleCloser = setInterval(closeExpiredCycles, 60_000);
-  cycleCloser.unref();
-  console.log(`====================================================`);
-  console.log(`🚀 Wasel Transport Server is running on port ${PORT}`);
-  console.log(`🌐 Local API URL: http://localhost:${PORT}/api`);
-  console.log(`📅 Today's Date Cycle: ${getTodayString()}`);
-  console.log(`====================================================`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    const cycleCloser = setInterval(() => closeExpiredCycles().catch((error) => console.error('Cycle close failed:', error)), 60_000);
+    cycleCloser.unref();
+    console.log(`🚀 Wasel API is running on port ${PORT}`);
+    console.log(`🌐 Local API URL: http://localhost:${PORT}/api`);
+  });
+}
+
+module.exports = app;

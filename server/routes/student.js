@@ -9,7 +9,7 @@ const {
   getMinutesUntilDeparture,
   getMaxAdvanceBookingDays,
   isDateOpen,
-} = require('../services/dailyOperationsService');
+} = require('../services/dailyOperationsService.pg');
 
 const router = express.Router();
 
@@ -39,7 +39,7 @@ function formatArabicDate(dateStr) {
  * GET /api/student/dashboard
  * Complete student dashboard with today's state, trip, booking, and attendance status
  */
-router.get('/dashboard', (req, res) => {
+router.get('/dashboard', async (req, res) => {
   try {
     const student = req.student;
     if (!student) {
@@ -48,11 +48,11 @@ router.get('/dashboard', (req, res) => {
 
     const today = getTodayString();
     const tomorrow = getTomorrowString();
-    const isTodayOpen = isDateOpen(today);
-    const selfCheckInEnabled = getSetting('allow_student_self_check_in', 'false') === 'true';
+    const isTodayOpen = await isDateOpen(today);
+    const selfCheckInEnabled = await getSetting('allow_student_self_check_in', 'false') === 'true';
 
     // Look for today's booking
-    const todayBooking = queryOne(
+    const todayBooking = await queryOne(
       `SELECT 
         b.id as booking_id, b.booking_code, b.date, b.status as booking_status, b.qr_code_token, b.created_at as booked_at,
         t.id as trip_id, t.trip_code, t.departure_time, t.status as trip_status,
@@ -74,7 +74,7 @@ router.get('/dashboard', (req, res) => {
     );
 
     // Look for tomorrow's booking
-    const tomorrowBooking = queryOne(
+    const tomorrowBooking = await queryOne(
       `SELECT b.id as booking_id, b.booking_code, t.departure_time, r.name as route_name, v.vehicle_number
        FROM bookings b
        JOIN trips t ON b.trip_id = t.id
@@ -85,10 +85,10 @@ router.get('/dashboard', (req, res) => {
     );
 
     // Check if trips are available for booking tomorrow
-    const tomorrowTripsCount = queryOne(
+    const tomorrowTripsCount = Number((await queryOne(
       `SELECT COUNT(id) as count FROM trips WHERE date = ? AND status = 'SCHEDULED' AND booked_seats < capacity`,
       [tomorrow]
-    )?.count || 0;
+    ))?.count || 0);
 
     return res.json({
       success: true,
@@ -147,7 +147,7 @@ router.get('/dashboard', (req, res) => {
  * POST /api/student/attendance/check-in
  * Self attendance check-in by the student
  */
-router.post('/attendance/check-in', (req, res) => {
+router.post('/attendance/check-in', async (req, res) => {
   try {
     const student = req.student;
     if (!student) {
@@ -156,7 +156,7 @@ router.post('/attendance/check-in', (req, res) => {
 
     const today = getTodayString();
 
-    if (getSetting('allow_student_self_check_in', 'false') !== 'true') {
+    if (await getSetting('allow_student_self_check_in', 'false') !== 'true') {
       return res.status(403).json({
         success: false,
         message: 'الحضور يسجله السائق عند الصعود. اعرض رمز QR للسائق لتأكيد حضورك.',
@@ -164,7 +164,7 @@ router.post('/attendance/check-in', (req, res) => {
     }
 
     // 1. Check if today's cycle is OPEN
-    if (!isDateOpen(today)) {
+    if (!await isDateOpen(today)) {
       return res.status(400).json({
         success: false,
         message: 'عذراً، تم إغلاق دورة اليوم من قبل الإدارة. لا يمكن تسجيل الحضور بعد الإغلاق.',
@@ -172,7 +172,7 @@ router.post('/attendance/check-in', (req, res) => {
     }
 
     // 2. Fetch today's confirmed booking
-    const booking = queryOne(
+    const booking = await queryOne(
       `SELECT b.id, b.trip_id, b.student_id, b.status, t.status as trip_status
        FROM bookings b
        JOIN trips t ON b.trip_id = t.id
@@ -195,7 +195,7 @@ router.post('/attendance/check-in', (req, res) => {
     }
 
     // 3. Check if already checked in
-    const existingAttendance = queryOne(
+    const existingAttendance = await queryOne(
       'SELECT id, checked_in_at, method FROM attendances WHERE booking_id = ?',
       [booking.id]
     );
@@ -210,14 +210,14 @@ router.post('/attendance/check-in', (req, res) => {
     }
 
     // 4. Perform atomic check-in insertion
-    const result = transaction(({ run, queryOne }) => {
-      run(
+    const result = await transaction(async ({ run, queryOne }) => {
+      await run(
         `INSERT INTO attendances (booking_id, student_id, trip_id, date, status, method, checked_in_at)
-         VALUES (?, ?, ?, ?, 'PRESENT', 'SELF_APP', datetime('now', 'localtime'))`,
+         VALUES (?, ?, ?, ?, 'PRESENT', 'SELF_APP', CURRENT_TIMESTAMP)`,
         [booking.id, student.student_id, booking.trip_id, today]
       );
 
-      return queryOne('SELECT * FROM attendances WHERE booking_id = ?', [booking.id]);
+      return await queryOne('SELECT * FROM attendances WHERE booking_id = ?', [booking.id]);
     });
 
     return res.json({
@@ -243,23 +243,23 @@ router.post('/attendance/check-in', (req, res) => {
  * GET /api/student/available-trips
  * List available trips for a specific date (today or tomorrow or future date)
  */
-router.get('/available-trips', (req, res) => {
+router.get('/available-trips', async (req, res) => {
   try {
     const date = req.query.date || getTomorrowString();
     const today = getTodayString();
     const todayDate = new Date(`${today}T00:00:00`);
     const latestDate = new Date(todayDate);
-    latestDate.setDate(latestDate.getDate() + getMaxAdvanceBookingDays());
+    latestDate.setDate(latestDate.getDate() + await getMaxAdvanceBookingDays());
     const latestDateString = `${latestDate.getFullYear()}-${String(latestDate.getMonth() + 1).padStart(2, '0')}-${String(latestDate.getDate()).padStart(2, '0')}`;
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < today || date > latestDateString) {
       return res.status(400).json({
         success: false,
-        message: `يمكن استعراض الرحلات من اليوم وحتى ${getMaxAdvanceBookingDays()} أيام مقدماً فقط.`,
+        message: `يمكن استعراض الرحلات من اليوم وحتى ${await getMaxAdvanceBookingDays()} أيام مقدماً فقط.`,
       });
     }
 
-    const trips = queryAll(
+    const trips = await queryAll(
       `SELECT 
         t.id, t.trip_code, t.date, t.departure_time, t.capacity, t.booked_seats, t.status,
         (t.capacity - t.booked_seats) as available_seats,
@@ -276,7 +276,7 @@ router.get('/available-trips', (req, res) => {
       [date]
     );
 
-    const existingBooking = queryOne(
+    const existingBooking = await queryOne(
       `SELECT b.id as booking_id, b.booking_code, t.trip_code, t.departure_time, r.name as route_name, v.vehicle_number
        FROM bookings b
        JOIN trips t ON t.id = b.trip_id
@@ -287,13 +287,13 @@ router.get('/available-trips', (req, res) => {
     );
 
     // Fetch pickup points for each route
-    const bookingCutoffMin = Math.max(0, Number.parseInt(getSetting('booking_cutoff_min', '30'), 10) || 0);
+    const bookingCutoffMin = Math.max(0, Number.parseInt(await getSetting('booking_cutoff_min', '30'), 10) || 0);
     const tripsWithinBookingWindow = trips.filter((trip) =>
       getMinutesUntilDeparture(trip.date, trip.departure_time) > bookingCutoffMin
     );
 
-    const tripsWithPickups = tripsWithinBookingWindow.map((trip) => {
-      const pickups = queryAll(
+    const tripsWithPickups = await Promise.all(tripsWithinBookingWindow.map(async (trip) => {
+      const pickups = await queryAll(
         `SELECT id, name, sequence_order, expected_time_offset_min, landmark
          FROM pickup_points
          WHERE route_id = ?
@@ -305,7 +305,7 @@ router.get('/available-trips', (req, res) => {
         is_full: trip.available_seats <= 0,
         pickups,
       };
-    });
+    }));
 
     return res.json({
       success: true,
@@ -325,7 +325,7 @@ router.get('/available-trips', (req, res) => {
  * POST /api/student/book
  * Book a trip
  */
-router.post('/book', (req, res) => {
+router.post('/book', async (req, res) => {
   try {
     const student = req.student;
     const tripId = Number.parseInt(req.body.trip_id, 10);
@@ -338,7 +338,7 @@ router.post('/book', (req, res) => {
       });
     }
 
-    const trip = queryOne(
+    const trip = await queryOne(
       'SELECT id, trip_code, date, departure_time, route_id, capacity, booked_seats, status FROM trips WHERE id = ?',
       [tripId]
     );
@@ -351,7 +351,7 @@ router.post('/book', (req, res) => {
       return res.status(400).json({ success: false, message: 'الرحلة غير متاحة للحجز حالياً.' });
     }
 
-    const pickupPoint = queryOne('SELECT id FROM pickup_points WHERE id = ? AND route_id = ?', [pickupPointId, trip.route_id]);
+    const pickupPoint = await queryOne('SELECT id FROM pickup_points WHERE id = ? AND route_id = ?', [pickupPointId, trip.route_id]);
     if (!pickupPoint) {
       return res.status(400).json({ success: false, message: 'نقطة الركوب لا تتبع خط الرحلة المختار.' });
     }
@@ -359,20 +359,20 @@ router.post('/book', (req, res) => {
     const today = getTodayString();
     const todayDate = new Date(`${today}T00:00:00`);
     const latestDate = new Date(todayDate);
-    latestDate.setDate(latestDate.getDate() + getMaxAdvanceBookingDays());
+    latestDate.setDate(latestDate.getDate() + await getMaxAdvanceBookingDays());
     const latestDateString = `${latestDate.getFullYear()}-${String(latestDate.getMonth() + 1).padStart(2, '0')}-${String(latestDate.getDate()).padStart(2, '0')}`;
     if (trip.date < today || trip.date > latestDateString) {
       return res.status(400).json({ success: false, message: 'موعد هذه الرحلة خارج فترة الحجز المسموح بها.' });
     }
 
-    if (!isDateOpen(trip.date)) {
+    if (!await isDateOpen(trip.date)) {
       return res.status(400).json({
         success: false,
         message: 'عذراً، تم إغلاق دورة هذا اليوم ولا يمكن إجراء حجوزات جديدة.',
       });
     }
 
-    const bookingCutoffMin = Math.max(0, Number.parseInt(getSetting('booking_cutoff_min', '30'), 10) || 0);
+    const bookingCutoffMin = Math.max(0, Number.parseInt(await getSetting('booking_cutoff_min', '30'), 10) || 0);
     if (getMinutesUntilDeparture(trip.date, trip.departure_time) <= bookingCutoffMin) {
       return res.status(400).json({ success: false, message: 'انتهت مهلة الحجز لهذه الرحلة.' });
     }
@@ -385,7 +385,7 @@ router.post('/book', (req, res) => {
     }
 
     // Check if student already booked for this trip or on the same date
-    const existing = queryOne(
+    const existing = await queryOne(
       `SELECT id FROM bookings WHERE student_id = ? AND date = ? AND status = 'CONFIRMED'`,
       [student.student_id, trip.date]
     );
@@ -403,18 +403,36 @@ router.post('/book', (req, res) => {
     const qr_code_token = crypto.randomBytes(32).toString('base64url');
 
     // Execute booking atomically
-    const newBooking = transaction(({ run, queryOne }) => {
-      const bRes = run(
+    const newBooking = await transaction(async ({ run, queryOne }) => {
+      const lockedTrip = await queryOne(
+        'SELECT id, capacity, booked_seats, status FROM trips WHERE id = ? FOR UPDATE',
+        [trip.id]
+      );
+      if (!lockedTrip || lockedTrip.status !== 'SCHEDULED' || lockedTrip.booked_seats >= lockedTrip.capacity) return null;
+      const confirmedForDate = await queryOne(
+        "SELECT id FROM bookings WHERE student_id = ? AND date = ? AND status = 'CONFIRMED'",
+        [student.student_id, trip.date]
+      );
+      if (confirmedForDate) return null;
+
+      const bRes = await run(
         `INSERT INTO bookings (booking_code, student_id, trip_id, date, pickup_point_id, qr_code_token, status)
          VALUES (?, ?, ?, ?, ?, ?, 'CONFIRMED')`,
         [booking_code, student.student_id, trip.id, trip.date, pickupPointId, qr_code_token]
       );
 
       // Increment booked seats
-      run('UPDATE trips SET booked_seats = booked_seats + 1 WHERE id = ?', [trip.id]);
+      await run('UPDATE trips SET booked_seats = booked_seats + 1 WHERE id = ?', [trip.id]);
 
-      return queryOne('SELECT * FROM bookings WHERE id = ?', [bRes.lastInsertRowid]);
+      return await queryOne('SELECT * FROM bookings WHERE id = ?', [bRes.lastInsertRowid]);
     });
+
+    if (!newBooking) {
+      return res.status(409).json({
+        success: false,
+        message: 'لم يعد المقعد متاحاً أو لديك حجز مؤكد في هذا اليوم.',
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -423,6 +441,9 @@ router.post('/book', (req, res) => {
     });
   } catch (error) {
     console.error('Booking error:', error);
+    if (error.code === '23505') {
+      return res.status(409).json({ success: false, message: 'لديك حجز مؤكد بالفعل في هذا اليوم.' });
+    }
     return res.status(500).json({ success: false, message: 'حدث خطأ أثناء إجراء الحجز.' });
   }
 });
@@ -431,7 +452,7 @@ router.post('/book', (req, res) => {
  * POST /api/student/cancel-booking
  * Cancel an existing booking
  */
-router.post('/cancel-booking', (req, res) => {
+router.post('/cancel-booking', async (req, res) => {
   try {
     const student = req.student;
     const booking_id = Number.parseInt(req.body.booking_id, 10);
@@ -440,7 +461,7 @@ router.post('/cancel-booking', (req, res) => {
       return res.status(400).json({ success: false, message: 'معرف الحجز مطلوب.' });
     }
 
-    const booking = queryOne(
+    const booking = await queryOne(
       `SELECT b.id, b.trip_id, b.date, b.status, t.departure_time
        FROM bookings b JOIN trips t ON t.id = b.trip_id
        WHERE b.id = ? AND b.student_id = ?`,
@@ -455,16 +476,16 @@ router.post('/cancel-booking', (req, res) => {
       return res.status(400).json({ success: false, message: 'الحجز ملغى بالفعل.' });
     }
 
-    if (getSetting('allow_cancellation', 'true') !== 'true') {
+    if (await getSetting('allow_cancellation', 'true') !== 'true') {
       return res.status(400).json({ success: false, message: 'إلغاء الحجوزات غير متاح حالياً. تواصل مع الإدارة للمساعدة.' });
     }
 
-    const cancellationCutoffMin = Math.max(0, Number.parseInt(getSetting('cancellation_cutoff_min', '60'), 10) || 0);
+    const cancellationCutoffMin = Math.max(0, Number.parseInt(await getSetting('cancellation_cutoff_min', '60'), 10) || 0);
     if (getMinutesUntilDeparture(booking.date, booking.departure_time) <= cancellationCutoffMin) {
       return res.status(400).json({ success: false, message: `لا يمكن إلغاء الحجز قبل موعد الرحلة بأقل من ${cancellationCutoffMin} دقيقة.` });
     }
 
-    if (!isDateOpen(booking.date)) {
+    if (!await isDateOpen(booking.date)) {
       return res.status(400).json({
         success: false,
         message: 'لا يمكن إلغاء الحجز لأن دورة هذا اليوم مغلقة.',
@@ -472,7 +493,7 @@ router.post('/cancel-booking', (req, res) => {
     }
 
     // Check if attendance already recorded
-    const attendance = queryOne('SELECT id FROM attendances WHERE booking_id = ?', [booking.id]);
+    const attendance = await queryOne('SELECT id FROM attendances WHERE booking_id = ?', [booking.id]);
     if (attendance) {
       return res.status(400).json({
         success: false,
@@ -480,9 +501,9 @@ router.post('/cancel-booking', (req, res) => {
       });
     }
 
-    transaction(({ run }) => {
-      run(`UPDATE bookings SET status = 'CANCELLED' WHERE id = ?`, [booking.id]);
-      run('UPDATE trips SET booked_seats = MAX(0, booked_seats - 1) WHERE id = ?', [booking.trip_id]);
+    await transaction(async ({ run }) => {
+      await run(`UPDATE bookings SET status = 'CANCELLED' WHERE id = ?`, [booking.id]);
+      await run('UPDATE trips SET booked_seats = GREATEST(0, booked_seats - 1) WHERE id = ?', [booking.trip_id]);
     });
 
     return res.json({
@@ -499,11 +520,11 @@ router.post('/cancel-booking', (req, res) => {
  * GET /api/student/history
  * Full attendance and booking history for the logged-in student (strictly private)
  */
-router.get('/history', (req, res) => {
+router.get('/history', async (req, res) => {
   try {
     const student = req.student;
 
-    const history = queryAll(
+    const history = await queryAll(
       `SELECT 
         b.id as booking_id, b.booking_code, b.date, b.status as booking_status,
         t.departure_time, t.trip_code, t.status as trip_status,
@@ -526,10 +547,13 @@ router.get('/history', (req, res) => {
     const activeHistory = history.filter((item) => item.booking_status !== 'CANCELLED');
     const totalBookings = activeHistory.length;
     const attendedCount = history.filter((h) => h.attendance_status === 'PRESENT').length;
-    const finalizedHistory = activeHistory.filter((item) => item.attendance_status || item.date < getTodayString() || item.trip_status === 'COMPLETED' || item.trip_status === 'CANCELLED' || !isDateOpen(item.date));
+    const dateOpen = new Map(await Promise.all(
+      [...new Set(history.map((item) => item.date))].map(async (date) => [date, await isDateOpen(date)])
+    ));
+    const finalizedHistory = activeHistory.filter((item) => item.attendance_status || item.date < getTodayString() || item.trip_status === 'COMPLETED' || item.trip_status === 'CANCELLED' || !dateOpen.get(item.date));
     const absentCount = finalizedHistory.filter((item) => !item.attendance_status).length;
-    const cancellationAllowed = getSetting('allow_cancellation', 'true') === 'true';
-    const cancellationCutoffMin = Math.max(0, Number.parseInt(getSetting('cancellation_cutoff_min', '60'), 10) || 0);
+    const cancellationAllowed = await getSetting('allow_cancellation', 'true') === 'true';
+    const cancellationCutoffMin = Math.max(0, Number.parseInt(await getSetting('cancellation_cutoff_min', '60'), 10) || 0);
 
     return res.json({
       success: true,
@@ -546,7 +570,7 @@ router.get('/history', (req, res) => {
           && item.booking_status === 'CONFIRMED'
           && !item.attendance_status
           && item.trip_status === 'SCHEDULED'
-          && isDateOpen(item.date)
+          && dateOpen.get(item.date)
           && getMinutesUntilDeparture(item.date, item.departure_time) > cancellationCutoffMin,
         attendance_label: item.attendance_status === 'PRESENT'
           ? 'PRESENT'
@@ -554,7 +578,7 @@ router.get('/history', (req, res) => {
           ? 'EXCUSED'
           : item.booking_status === 'CANCELLED'
           ? 'CANCELLED'
-          : item.date < getTodayString() || item.trip_status === 'COMPLETED' || item.trip_status === 'CANCELLED' || !isDateOpen(item.date)
+          : item.date < getTodayString() || item.trip_status === 'COMPLETED' || item.trip_status === 'CANCELLED' || !dateOpen.get(item.date)
           ? 'ABSENT'
           : 'PENDING',
       })),
@@ -569,16 +593,16 @@ router.get('/history', (req, res) => {
  * GET /api/student/routes
  * List all active routes and pickup points for registration or selection
  */
-router.get('/routes', (req, res) => {
+router.get('/routes', async (req, res) => {
   try {
-    const routes = queryAll('SELECT * FROM routes WHERE is_active = 1 ORDER BY name ASC');
-    const fullRoutes = routes.map((r) => {
-      const pickups = queryAll(
+    const routes = await queryAll('SELECT * FROM routes WHERE is_active = 1 ORDER BY name ASC');
+    const fullRoutes = await Promise.all(routes.map(async (r) => {
+      const pickups = await queryAll(
         'SELECT * FROM pickup_points WHERE route_id = ? ORDER BY sequence_order ASC',
         [r.id]
       );
       return { ...r, pickup_points: pickups };
-    });
+    }));
     return res.json({ success: true, routes: fullRoutes });
   } catch (error) {
     console.error('Routes error:', error);

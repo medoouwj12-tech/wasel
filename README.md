@@ -58,24 +58,10 @@
 
 ---
 
-## 🔑 الحسابات التجريبية الجاهزة للاختبار الفوري
-
-الحسابات التالية بيانات تطوير محلية ينشئها `npm run seed` على قاعدة بيانات فارغة. **لا تستخدمها أو تشغّل بيانات العرض في الإنتاج.**
-
-| الدور (Role) | رقم الهاتف (Phone) | كلمة المرور (Password) | الوصف |
-| :--- | :--- | :--- | :--- |
-| **طالب (Student)** | `01012345678` | `student123` | محمد أحمد حسن (جاهز لاختبار زر تسجيل الحضور اليومي) |
-| **طالبة (Student)** | `01087654321` | `student123` | سارة خالد إبراهيم (تم تسجيل حضورها مسبقاً) |
-| **سائق (Driver)** | `01111111111` | `driver123` | كابتن أحمد محمود (أوتوبيس Bus #05) |
-| **سائق (Driver)** | `01222222222` | `driver123` | كابتن محمود علي (أوتوبيس Bus #12) |
-| **مدير النظام (Admin)** | `01000000000` | `admin123` | لوحة التحكم والإدارة الشاملة |
-
----
-
 ## 🛠️ البنية التقنية (Architecture & Tech Stack)
 
 * **Backend**: Node.js + Express REST API (مع دعم Express 5).
-* **Database**: SQLite عبر `node:sqlite` مع WAL والمفاتيح الخارجية والمعاملات.
+* **Database**: Supabase PostgreSQL مع معاملات ومفاتيح خارجية، والاتصال يتم من الخادم فقط.
 * **Authentication**: JWT (JSON Web Tokens) مع تشفير كلمات المرور عبر `bcryptjs` ونظام صلاحيات RBAC صارم.
 * **Frontend**: React 19 + Vite + Tailwind CSS + Lucide Icons + Cairo Font (RTL Native).
 * **PWA**: Web App Manifest (`manifest.json`) + Service Worker (`sw.js`) + App Icons (192x192, 512x512, Maskable) + Install Prompt.
@@ -85,40 +71,43 @@
 
 ## 🚀 تشغيل النظام
 
-يتطلب المشروع Node.js 22.13 أو أحدث ليتوفر `node:sqlite` من دون علم تشغيل تجريبي. ثبّت تبعيات الجذر والواجهة مرة واحدة:
+يتطلب المشروع Node.js 22 أو أحدث. أنشئ مشروع Supabase وضع عنوان Transaction Pooler في `DATABASE_URL` داخل `.env`:
 
 ```bash
 npm ci
 npm ci --prefix client
+npm run db:apply-schema
 ```
 
-للتطوير المحلي مع بيانات العرض:
+ضع `DATABASE_URL` في `.env` محلياً قبل أوامر قاعدة البيانات. إذا كان ملف SQLite في مسار مختلف عن `server/database/transport.db`، حدّد `SQLITE_SOURCE_PATH` أيضاً. انقل البيانات الموجودة مرة واحدة عبر `npm run migrate:sqlite`، وأنشئ مديراً جديداً فقط إذا لم ينتقل حساب مدير موجود.
+
+شغّل الواجهة والخادم:
 
 ```bash
-npm run seed
 npm run build
 npm start
 ```
+
+شغّل `npm run migrate:sqlite` مرة واحدة فقط عند نقل بيانات محلية. شغّل `npm run bootstrap:admin` فقط عند عدم وجود حساب مدير.
 
 يفتح التطبيق على [http://localhost:5000](http://localhost:5000). لتشغيل واجهة التطوير منفصلةً استخدم `npm run client` وشغّل الخادم في نافذة أخرى باستخدام `npm run server`.
 
 ## 🚢 تسليم الإنتاج
 
-1. انسخ `.env.example` إلى `.env` أو أدخل القيم كمتغيرات بيئة في منصة الاستضافة. لا ترفع ملف `.env` أو قاعدة بيانات التطوير إلى مستودع العميل.
-2. استخدم قاعدة بيانات جديدة ومجلداً دائماً للبيانات، واضبط `DATABASE_PATH` على ملف SQLite داخل هذا المجلد. بدء الخادم في الإنتاج يرفض استخدام المسار المحلي الافتراضي.
-3. عيّن `NODE_ENV=production` و`TZ=Africa/Cairo`، وضع قيمة عشوائية سرية لا تقل عن 32 حرفاً في `JWT_SECRET`. اترك `REQUIRE_STUDENT_APPROVAL=true` حتى يراجع المدير تسجيلات الطلاب.
-4. وجّه النطاق إلى الخادم عبر HTTPS؛ الوصول للكاميرا وميزة تثبيت PWA يحتاجان سياقاً آمناً. إذا كانت الواجهة وAPI على نطاقين مختلفين، اضبط `VITE_API_BASE` بعنوان API وأضف أصل الواجهة كاملاً إلى `CORS_ORIGINS`. استخدم `TRUST_PROXY=true` فقط خلف وكيل عكسي موثوق.
-5. ثبّت التبعيات وابنِ الواجهة ثم أنشئ حساب المدير الأول. بيانات العرض محظورة في بيئة الإنتاج.
+1. أنشئ مشروع Supabase وشغّل `npm run db:apply-schema` محلياً بعد ضبط `DATABASE_URL`، أو نفّذ `supabase/migrations/0001_initial_schema.sql` مرة واحدة من SQL Editor.
+2. من Supabase انسخ رابط **Transaction Pooler** وضعه كـ `DATABASE_URL` في إعدادات Vercel، لبيئات Production وPreview حسب الحاجة.
+3. اجعل Vercel Root Directory هو جذر المستودع، واترك إعدادات البناء و`client/dist` كما في `vercel.json`. المسارات `/api/*` تذهب إلى Express، والواجهة تبقى على Vercel.
+4. أضف `APP_TIME_ZONE=Africa/Cairo` و`JWT_SECRET` عشوائياً بطول 32 حرفاً على الأقل و`REQUIRE_STUDENT_APPROVAL=true` إلى Vercel. لا تضف مفاتيح Supabase إلى متغيرات `VITE_*` ولا تضع أسراراً في ملفات الواجهة.
+5. عند الحاجة، انقل بيانات SQLite المحلية مرة واحدة عبر `npm run migrate:sqlite`. أنشئ المدير من جهازك باستخدام `.env` محلي يحوي `DATABASE_URL` وحقول `INITIAL_ADMIN_*` ثم شغّل `npm run bootstrap:admin` فقط إذا لم ينتقل حساب مدير. لا تضع كلمة مرور المدير في كود المستودع.
 
 ```bash
 npm ci
 npm ci --prefix client
 npm run build
-npm run bootstrap:admin
 npm start
 ```
 
-املأ `INITIAL_ADMIN_NAME` و`INITIAL_ADMIN_PHONE` و`INITIAL_ADMIN_PASSWORD` قبل `bootstrap:admin`، واحذف كلمة المرور من بيئة التشغيل بعد إنشاء المدير. سجّل الدخول وأضف بيانات الشركة، وخطوط السير، ونقاط الركوب، والمركبات، والسائقين، والرحلات. خصص مساحة قرص دائمة للملف ونسخاً احتياطية دورية، وشغّل نسخة واحدة من خادم SQLite لكل قاعدة بيانات.
+املأ `INITIAL_ADMIN_NAME` و`INITIAL_ADMIN_PHONE` و`INITIAL_ADMIN_PASSWORD` محلياً قبل تشغيل `bootstrap:admin`، ثم سجّل الدخول وأضف بيانات الشركة وخطوط السير ونقاط الركوب والمركبات والسائقين والرحلات. بيانات الاتصال بقاعدة البيانات تبقى في الخادم ولا تصل إلى المتصفح.
 
 قبل التسليم، استبدل بيانات الشركة وبيانات العرض، وراجع نصوص الخصوصية وموافقة ولي الأمر وإجراءات دعم الطوارئ بما يناسب الجهة التي ستستخدم النظام.
 

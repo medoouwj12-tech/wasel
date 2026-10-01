@@ -61,7 +61,7 @@ router.post('/register', registrationRateLimit, async (req, res) => {
     }
 
     // Check if phone already registered
-    const existing = queryOne('SELECT id FROM users WHERE phone = ?', [cleanPhone]);
+    const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [cleanPhone]);
     if (existing) {
       return res.status(409).json({
         success: false,
@@ -79,7 +79,7 @@ router.post('/register', registrationRateLimit, async (req, res) => {
       if (normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
         return res.status(400).json({ success: false, message: 'صيغة البريد الإلكتروني غير صحيحة.' });
       }
-      const existingEmail = queryOne('SELECT id FROM users WHERE lower(email) = lower(?)', [normalizedEmail]);
+      const existingEmail = await queryOne('SELECT id FROM users WHERE lower(email) = lower(?)', [normalizedEmail]);
       if (existingEmail) {
         return res.status(409).json({ success: false, message: 'البريد الإلكتروني مسجل بالفعل.' });
       }
@@ -88,7 +88,7 @@ router.post('/register', registrationRateLimit, async (req, res) => {
     if (default_pickup_id) {
       const pickupId = Number.parseInt(default_pickup_id, 10);
       const pickup = Number.isInteger(pickupId)
-        ? queryOne('SELECT p.id FROM pickup_points p JOIN routes r ON r.id = p.route_id WHERE p.id = ? AND r.is_active = 1', [pickupId])
+        ? await queryOne('SELECT p.id FROM pickup_points p JOIN routes r ON r.id = p.route_id WHERE p.id = ? AND r.is_active = 1', [pickupId])
         : null;
       if (!pickup) {
         return res.status(400).json({ success: false, message: 'نقطة الركوب المختارة غير متاحة.' });
@@ -106,15 +106,15 @@ router.post('/register', registrationRateLimit, async (req, res) => {
     const requiresApproval = process.env.NODE_ENV === 'production' && process.env.REQUIRE_STUDENT_APPROVAL !== 'false';
 
     // Insert user and student inside a transaction
-    const newUser = transaction(({ run }) => {
-      const userRes = run(
+    const newUser = await transaction(async ({ run }) => {
+      const userRes = await run(
         `INSERT INTO users (full_name, phone, email, password_hash, role, is_active)
          VALUES (?, ?, ?, ?, 'STUDENT', ?)`,
         [full_name.trim(), cleanPhone, normalizedEmail, password_hash, requiresApproval ? 0 : 1]
       );
       const userId = userRes.lastInsertRowid;
 
-      run(
+      await run(
         `INSERT INTO students (user_id, student_code, default_pickup_id, emergency_phone, institution, grade_level, notes)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
@@ -181,7 +181,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
     const cleanLogin = login.trim();
 
     // Query user by phone or email
-    const user = queryOne(
+    const user = await queryOne(
       `SELECT id, full_name, phone, email, password_hash, role, is_active 
        FROM users 
        WHERE phone = ? OR email = ?`,
@@ -215,7 +215,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
     let driverInfo = null;
 
     if (user.role === 'STUDENT') {
-      studentInfo = queryOne(
+      studentInfo = await queryOne(
         `SELECT s.id as student_id, s.student_code, s.default_pickup_id, s.emergency_phone, s.institution, s.grade_level,
                 p.name as default_pickup_name
          FROM students s
@@ -227,7 +227,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
         return res.status(403).json({ success: false, message: 'ملف الطالب غير مكتمل. تواصل مع إدارة النقل.' });
       }
     } else if (user.role === 'DRIVER') {
-      driverInfo = queryOne(
+      driverInfo = await queryOne(
         'SELECT id as driver_id, license_number, status FROM drivers WHERE user_id = ?',
         [user.id]
       );
@@ -265,7 +265,7 @@ router.post('/login', loginRateLimit, async (req, res) => {
  * GET /api/auth/me
  * Get currently authenticated user
  */
-router.get('/me', authenticateToken, (req, res) => {
+router.get('/me', authenticateToken, async (req, res) => {
   return res.json({
     success: true,
     user: {
@@ -285,14 +285,14 @@ router.put('/profile', authenticateToken, async (req, res) => {
     const { full_name, email, emergency_phone, default_pickup_id, password } = req.body;
 
     if (full_name) {
-      run('UPDATE users SET full_name = ?, updated_at = datetime("now", "localtime") WHERE id = ?', [
+      await run('UPDATE users SET full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
         full_name.trim(),
         req.user.id,
       ]);
     }
 
     if (email !== undefined) {
-      run('UPDATE users SET email = ?, updated_at = datetime("now", "localtime") WHERE id = ?', [
+      await run('UPDATE users SET email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
         email ? email.trim() : null,
         req.user.id,
       ]);
@@ -301,14 +301,14 @@ router.put('/profile', authenticateToken, async (req, res) => {
     if (password && password.length >= 6) {
       const salt = await bcrypt.genSalt(10);
       const hash = await bcrypt.hash(password, salt);
-      run('UPDATE users SET password_hash = ?, updated_at = datetime("now", "localtime") WHERE id = ?', [
+      await run('UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
         hash,
         req.user.id,
       ]);
     }
 
     if (req.user.role === 'STUDENT') {
-      run(
+      await run(
         `UPDATE students 
          SET emergency_phone = COALESCE(?, emergency_phone),
              default_pickup_id = COALESCE(?, default_pickup_id)

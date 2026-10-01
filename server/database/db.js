@@ -1,75 +1,84 @@
-const { DatabaseSync } = require('node:sqlite');
-const path = require('path');
+const { Pool, types } = require('pg');
 const fs = require('fs');
+const path = require('path');
 
-const dbPath = process.env.DATABASE_PATH
-  ? path.resolve(process.env.DATABASE_PATH)
-  : path.join(__dirname, 'transport.db');
-const dbDir = path.dirname(dbPath);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+// PostgreSQL BIGINT values are returned as strings by node-postgres by default.
+types.setTypeParser(20, (value) => Number(value));
+types.setTypeParser(1082, (value) => value);
+
+const connectionString = process.env.DATABASE_URL;
+const sslMode = process.env.DATABASE_SSL || 'verify-full';
+const supabaseRootCertificate = fs.readFileSync(path.join(__dirname, 'prod-ca-2021.crt'), 'utf8');
+if (!connectionString) {
+  throw new Error('DATABASE_URL is required. Use the Supabase Transaction Pooler URL for Vercel.');
 }
 
-const db = new DatabaseSync(dbPath);
+const pool = new Pool({
+  connectionString,
+  max: Number(process.env.DB_POOL_MAX || 1),
+  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 10_000,
+  ssl: sslMode === 'disable' ? false : { ca: supabaseRootCertificate, rejectUnauthorized: true },
+});
+pool.on('error', (error) => console.error('Unexpected idle PostgreSQL client error:', error));
 
-// Enable foreign keys and WAL mode for reliability and speed
-db.exec(`
-  PRAGMA foreign_keys = ON;
-  PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
-`);
-
-/**
- * Helper to query multiple rows
- */
-function queryAll(sql, params = []) {
-  const stmt = db.prepare(sql);
-  return stmt.all(...params);
+function toPostgres(sql) {
+  let index = 0;
+  const ignoreConflict = /^\s*INSERT\s+OR\s+IGNORE\s+INTO/i.test(sql);
+  let statement = sql.replace(/INSERT\s+OR\s+IGNORE\s+INTO/gi, 'INSERT INTO')
+    .replace(/\?/g, () => `$${++index}`);
+  if (ignoreConflict && !/\bON\s+CONFLICT\b/i.test(statement)) statement += ' ON CONFLICT DO NOTHING';
+  return statement;
 }
 
-/**
- * Helper to query a single row
- */
-function queryOne(sql, params = []) {
-  const stmt = db.prepare(sql);
-  return stmt.get(...params);
+async function queryAll(sql, params = []) {
+  const result = await pool.query(toPostgres(sql), params);
+  return result.rows;
 }
 
-/**
- * Helper to execute INSERT, UPDATE, DELETE
- */
-function run(sql, params = []) {
-  const stmt = db.prepare(sql);
-  return stmt.run(...params);
+async function queryOne(sql, params = []) {
+  const result = await pool.query(toPostgres(sql), params);
+  return result.rows[0];
 }
 
-/**
- * Helper to execute multiple raw SQL statements
- */
-function exec(sql) {
-  return db.exec(sql);
+async function run(sql, params = [], executor = pool) {
+  let statement = toPostgres(sql);
+  const insertTable = statement.match(/^\s*INSERT\s+INTO\s+(?:public\.)?(\w+)/i)?.[1];
+  if (/^\s*INSERT\b/i.test(statement) && !/\bRETURNING\b/i.test(statement) && insertTable !== 'settings') {
+    statement += ' RETURNING id';
+  }
+  const result = await executor.query(statement, params);
+  const insertedId = result.rows[0]?.id;
+  return {
+    lastInsertRowid: insertedId == null ? undefined : Number(insertedId),
+    changes: result.rowCount || 0,
+    rows: result.rows,
+  };
 }
 
-/**
- * Helper to run transactions safely
- */
-function transaction(fn) {
-  db.exec('BEGIN TRANSACTION;');
+async function transaction(callback) {
+  const client = await pool.connect();
+  const tx = {
+    queryAll: async (sql, params = []) => (await client.query(toPostgres(sql), params)).rows,
+    queryOne: async (sql, params = []) => (await client.query(toPostgres(sql), params)).rows[0],
+    run: (sql, params = []) => run(sql, params, client),
+  };
+
   try {
-    const result = fn({ queryAll, queryOne, run, exec });
-    db.exec('COMMIT;');
+    await client.query('BEGIN');
+    const result = await callback(tx);
+    await client.query('COMMIT');
     return result;
-  } catch (err) {
-    db.exec('ROLLBACK;');
-    throw err;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
-module.exports = {
-  db,
-  queryAll,
-  queryOne,
-  run,
-  exec,
-  transaction,
-};
+async function closeDatabase() {
+  await pool.end();
+}
+
+module.exports = { pool, queryAll, queryOne, run, transaction, closeDatabase };

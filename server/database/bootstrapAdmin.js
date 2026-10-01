@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const bcrypt = require('bcryptjs');
-const { initSchema } = require('./schema');
+const { initSchema } = require('./postgresSchema');
 const { queryOne, run, transaction } = require('./db');
 
 async function bootstrapAdmin() {
@@ -12,20 +12,17 @@ async function bootstrapAdmin() {
   if (INITIAL_ADMIN_PASSWORD.length < 12) {
     throw new Error('INITIAL_ADMIN_PASSWORD must contain at least 12 characters.');
   }
-  if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_PATH) {
-    throw new Error('Set DATABASE_PATH to the persistent production database location.');
-  }
   if (!/^[0-9+()\-\s]{7,20}$/.test(INITIAL_ADMIN_PHONE.trim())) {
     throw new Error('INITIAL_ADMIN_PHONE has an invalid format.');
   }
 
-  initSchema();
-  if (queryOne('SELECT id FROM users WHERE phone = ?', [INITIAL_ADMIN_PHONE.trim()])) {
+  await initSchema();
+  if (await queryOne('SELECT id FROM users WHERE phone = ?', [INITIAL_ADMIN_PHONE.trim()])) {
     throw new Error('An account already uses INITIAL_ADMIN_PHONE. Choose another phone number.');
   }
 
   const passwordHash = await bcrypt.hash(INITIAL_ADMIN_PASSWORD, 12);
-  const user = transaction(({ run }) => run(
+  const user = await transaction(async ({ run }) => run(
     `INSERT INTO users (full_name, phone, password_hash, role)
      VALUES (?, ?, ?, 'ADMIN')`,
     [INITIAL_ADMIN_NAME.trim(), INITIAL_ADMIN_PHONE.trim(), passwordHash]
@@ -43,7 +40,7 @@ async function bootstrapAdmin() {
     ['allow_student_self_check_in', 'false'],
   ];
   for (const [key, value] of defaults) {
-    run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+    await run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', [key, value]);
   }
 
   console.log(`Created the initial administrator account (user id ${user.lastInsertRowid}).`);

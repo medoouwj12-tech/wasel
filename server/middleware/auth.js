@@ -26,7 +26,7 @@ function generateToken(user) {
 /**
  * Middleware to authenticate JWT token
  */
-function authenticateToken(req, res, next) {
+async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
@@ -37,56 +37,53 @@ function authenticateToken(req, res, next) {
     });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(403).json({
-        success: false,
-        message: 'جلسة الدخول منتهية أو غير صالحة. يُرجى تسجيل الدخول.',
-      });
-    }
+  let decoded;
+  try {
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(403).json({
+      success: false,
+      message: 'جلسة الدخول منتهية أو غير صالحة. يُرجى تسجيل الدخول.',
+    });
+  }
 
-    // Fetch latest user details from DB to guarantee account is active
-    const user = queryOne(
-      'SELECT id, full_name, phone, email, role, is_active FROM users WHERE id = ?',
-      [decoded.id]
+  const user = await queryOne(
+    'SELECT id, full_name, phone, email, role, is_active FROM users WHERE id = ?',
+    [decoded.id]
+  );
+
+  if (!user) {
+    return res.status(404).json({
+      success: false,
+      message: 'المستخدم غير موجود في النظام.',
+    });
+  }
+
+  if (!user.is_active) {
+    return res.status(403).json({
+      success: false,
+      message: 'تم تعطيل هذا الحساب من قبل الإدارة. يرجى مراجعة المشرف.',
+    });
+  }
+
+  if (user.role === 'STUDENT') {
+    req.student = await queryOne(
+      `SELECT s.id as student_id, s.student_code, s.default_pickup_id, s.emergency_phone, s.institution, s.grade_level,
+              p.name as default_pickup_name
+       FROM students s
+       LEFT JOIN pickup_points p ON s.default_pickup_id = p.id
+       WHERE s.user_id = ?`,
+      [user.id]
     );
+  } else if (user.role === 'DRIVER') {
+    req.driver = await queryOne(
+      'SELECT id as driver_id, license_number, experience_years, status FROM drivers WHERE user_id = ?',
+      [user.id]
+    );
+  }
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'المستخدم غير موجود في النظام.',
-      });
-    }
-
-    if (!user.is_active) {
-      return res.status(403).json({
-        success: false,
-        message: 'تم تعطيل هذا الحساب من قبل الإدارة. يرجى مراجعة المشرف.',
-      });
-    }
-
-    // Attach student or driver extra info if applicable
-    if (user.role === 'STUDENT') {
-      const student = queryOne(
-        `SELECT s.id as student_id, s.student_code, s.default_pickup_id, s.emergency_phone, s.institution, s.grade_level,
-                p.name as default_pickup_name
-         FROM students s
-         LEFT JOIN pickup_points p ON s.default_pickup_id = p.id
-         WHERE s.user_id = ?`,
-        [user.id]
-      );
-      req.student = student;
-    } else if (user.role === 'DRIVER') {
-      const driver = queryOne(
-        'SELECT id as driver_id, license_number, experience_years, status FROM drivers WHERE user_id = ?',
-        [user.id]
-      );
-      req.driver = driver;
-    }
-
-    req.user = user;
-    next();
-  });
+  req.user = user;
+  next();
 }
 
 /**

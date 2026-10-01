@@ -10,7 +10,7 @@ const {
   listAllCycles,
   closeDay,
   openDay,
-} = require('../services/dailyOperationsService');
+} = require('../services/dailyOperationsService.pg');
 
 const router = express.Router();
 
@@ -30,10 +30,10 @@ function isValidDate(date) {
   return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day;
 }
 
-function findScheduleConflict({ date, departureTime, duration, vehicleId, driverId, excludeTripId = null }) {
+async function findScheduleConflict({ date, departureTime, duration, vehicleId, driverId, excludeTripId = null }) {
   const start = timeToMinutes(departureTime);
   if (start === null) return 'صيغة وقت انطلاق الرحلة غير صحيحة.';
-  const scheduled = queryAll(
+  const scheduled = await queryAll(
     `SELECT t.id, t.departure_time, t.vehicle_id, t.driver_id, r.estimated_duration_min
      FROM trips t JOIN routes r ON r.id = t.route_id
      WHERE t.date = ? AND t.status IN ('SCHEDULED', 'IN_TRANSIT') AND (? IS NULL OR t.id != ?)`,
@@ -53,24 +53,24 @@ function findScheduleConflict({ date, departureTime, duration, vehicleId, driver
  * GET /api/admin/overview
  * Dashboard KPI cards and high-level analytics
  */
-router.get('/overview', (req, res) => {
+router.get('/overview', async (req, res) => {
   try {
     const date = req.query.date || getTodayString();
-    const stats = getDateStats(date);
+    const stats = await getDateStats(date);
 
-    const totalStudents = queryOne(
+    const totalStudents = Number((await queryOne(
       "SELECT COUNT(id) as count FROM users WHERE role = 'STUDENT' AND is_active = 1"
-    )?.count || 0;
+    ))?.count || 0);
 
-    const availableVehicles = queryOne(
+    const availableVehicles = Number((await queryOne(
       "SELECT COUNT(id) as count FROM vehicles WHERE status IN ('AVAILABLE', 'ASSIGNED')"
-    )?.count || 0;
+    ))?.count || 0);
 
-    const activeDrivers = queryOne(
+    const activeDrivers = Number((await queryOne(
       "SELECT COUNT(d.id) as count FROM drivers d JOIN users u ON d.user_id = u.id WHERE d.status = 'ACTIVE' AND u.is_active = 1"
-    )?.count || 0;
+    ))?.count || 0);
 
-    const recentBookings = queryAll(
+    const recentBookings = await queryAll(
       `SELECT 
         b.booking_code, b.created_at,
         u.full_name as student_name,
@@ -117,9 +117,9 @@ router.get('/overview', (req, res) => {
  * GET /api/admin/daily-operations
  * List all daily cycles with statistics
  */
-router.get('/daily-operations', (req, res) => {
+router.get('/daily-operations', async (req, res) => {
   try {
-    const cycles = listAllCycles();
+    const cycles = await listAllCycles();
     return res.json({ success: true, cycles });
   } catch (error) {
     console.error('Daily operations list error:', error);
@@ -131,14 +131,14 @@ router.get('/daily-operations', (req, res) => {
  * POST /api/admin/daily-operations/close
  * Close a specific daily cycle
  */
-router.post('/daily-operations/close', (req, res) => {
+router.post('/daily-operations/close', async (req, res) => {
   try {
     const { date, notes } = req.body;
     if (!date) {
       return res.status(400).json({ success: false, message: 'التاريخ مطلوب.' });
     }
 
-    const result = closeDay(date, req.user.id, notes);
+    const result = await closeDay(date, req.user.id, notes);
     return res.json(result);
   } catch (error) {
     console.error('Close day error:', error);
@@ -150,14 +150,14 @@ router.post('/daily-operations/close', (req, res) => {
  * POST /api/admin/daily-operations/open
  * Open or reopen a specific daily cycle
  */
-router.post('/daily-operations/open', (req, res) => {
+router.post('/daily-operations/open', async (req, res) => {
   try {
     const { date } = req.body;
     if (!date) {
       return res.status(400).json({ success: false, message: 'التاريخ مطلوب.' });
     }
 
-    const result = openDay(date);
+    const result = await openDay(date);
     return res.json(result);
   } catch (error) {
     console.error('Open day error:', error);
@@ -173,7 +173,7 @@ router.post('/daily-operations/open', (req, res) => {
  * GET /api/admin/students
  * List and search students
  */
-router.get('/students', (req, res) => {
+router.get('/students', async (req, res) => {
   try {
     const search = req.query.search ? `%${req.query.search.trim()}%` : null;
 
@@ -197,7 +197,7 @@ router.get('/students', (req, res) => {
 
     sql += ' ORDER BY s.id DESC';
 
-    const students = queryAll(sql, params);
+    const students = await queryAll(sql, params);
 
     const enriched = students.map((s) => {
       const rate = s.total_bookings > 0 ? Math.round((s.attended_count / s.total_bookings) * 100) : 0;
@@ -227,7 +227,7 @@ router.post('/students', async (req, res) => {
       return res.status(400).json({ success: false, message: 'الاسم ورقم الهاتف وكلمة المرور مطلوبة.' });
     }
 
-    const existing = queryOne('SELECT id FROM users WHERE phone = ?', [phone.trim()]);
+    const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [phone.trim()]);
     if (existing) {
       return res.status(409).json({ success: false, message: 'رقم الهاتف مسجل بالفعل لطالب آخر.' });
     }
@@ -237,15 +237,15 @@ router.post('/students', async (req, res) => {
     const currentYear = new Date().getFullYear();
     const student_code = `STU-${currentYear}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const newStudent = transaction(({ run, queryOne }) => {
-      const uRes = run(
+    const newStudent = await transaction(async ({ run, queryOne }) => {
+      const uRes = await run(
         `INSERT INTO users (full_name, phone, email, password_hash, role)
          VALUES (?, ?, ?, ?, 'STUDENT')`,
         [full_name.trim(), phone.trim(), email ? email.trim() : null, password_hash]
       );
       const userId = uRes.lastInsertRowid;
 
-      const sRes = run(
+      const sRes = await run(
         `INSERT INTO students (user_id, student_code, default_pickup_id, emergency_phone, institution, grade_level)
          VALUES (?, ?, ?, ?, ?, ?)`,
         [userId, student_code, default_pickup_id || null, emergency_phone || null, institution || null, grade_level || null]
@@ -274,27 +274,27 @@ router.put('/students/:id', async (req, res) => {
     const studentId = req.params.id;
     const { full_name, phone, email, default_pickup_id, emergency_phone, institution, grade_level, password } = req.body;
 
-    const student = queryOne('SELECT user_id FROM students WHERE id = ?', [studentId]);
+    const student = await queryOne('SELECT user_id FROM students WHERE id = ?', [studentId]);
     if (!student) {
       return res.status(404).json({ success: false, message: 'الطالب غير موجود.' });
     }
 
     // Check phone uniqueness if changed
     if (phone) {
-      const existing = queryOne('SELECT id FROM users WHERE phone = ? AND id != ?', [phone.trim(), student.user_id]);
+      const existing = await queryOne('SELECT id FROM users WHERE phone = ? AND id != ?', [phone.trim(), student.user_id]);
       if (existing) {
         return res.status(409).json({ success: false, message: 'رقم الهاتف مستخدم لحساب آخر.' });
       }
     }
 
-    transaction(({ run }) => {
+    await transaction(async ({ run }) => {
       if (full_name || phone || email !== undefined) {
-        run(
+        await run(
           `UPDATE users 
            SET full_name = COALESCE(?, full_name),
                phone = COALESCE(?, phone),
                email = COALESCE(?, email),
-               updated_at = datetime('now', 'localtime')
+               updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
           [full_name ? full_name.trim() : null, phone ? phone.trim() : null, email !== undefined ? (email ? email.trim() : null) : null, student.user_id]
         );
@@ -303,10 +303,10 @@ router.put('/students/:id', async (req, res) => {
       if (password && password.length >= 6) {
         const salt = bcrypt.genSaltSync(10);
         const hash = bcrypt.hashSync(password, salt);
-        run('UPDATE users SET password_hash = ? WHERE id = ?', [hash, student.user_id]);
+        await run('UPDATE users SET password_hash = ? WHERE id = ?', [hash, student.user_id]);
       }
 
-      run(
+      await run(
         `UPDATE students 
          SET default_pickup_id = ?,
              emergency_phone = ?,
@@ -334,15 +334,15 @@ router.put('/students/:id', async (req, res) => {
  * DELETE /api/admin/students/:id
  * Admin deletes a student and cascade removes their user record
  */
-router.delete('/students/:id', (req, res) => {
+router.delete('/students/:id', async (req, res) => {
   try {
     const studentId = req.params.id;
-    const student = queryOne('SELECT user_id FROM students WHERE id = ?', [studentId]);
+    const student = await queryOne('SELECT user_id FROM students WHERE id = ?', [studentId]);
     if (!student) {
       return res.status(404).json({ success: false, message: 'الطالب غير موجود.' });
     }
 
-    run('DELETE FROM users WHERE id = ?', [student.user_id]);
+    await run('DELETE FROM users WHERE id = ?', [student.user_id]);
     return res.json({ success: true, message: 'تم حذف حساب الطالب وكافة سجلاته بنجاح.' });
   } catch (error) {
     console.error('Delete student error:', error);
@@ -354,18 +354,18 @@ router.delete('/students/:id', (req, res) => {
  * PATCH /api/admin/students/:id/status
  * Toggle student active status
  */
-router.patch('/students/:id/status', (req, res) => {
+router.patch('/students/:id/status', async (req, res) => {
   try {
     const studentId = req.params.id;
-    const student = queryOne('SELECT user_id FROM students WHERE id = ?', [studentId]);
+    const student = await queryOne('SELECT user_id FROM students WHERE id = ?', [studentId]);
     if (!student) {
       return res.status(404).json({ success: false, message: 'الطالب غير موجود.' });
     }
 
-    const user = queryOne('SELECT is_active FROM users WHERE id = ?', [student.user_id]);
+    const user = await queryOne('SELECT is_active FROM users WHERE id = ?', [student.user_id]);
     const newStatus = user.is_active === 1 ? 0 : 1;
 
-    run('UPDATE users SET is_active = ? WHERE id = ?', [newStatus, student.user_id]);
+    await run('UPDATE users SET is_active = ? WHERE id = ?', [newStatus, student.user_id]);
 
     return res.json({
       success: true,
@@ -382,10 +382,10 @@ router.patch('/students/:id/status', (req, res) => {
  * GET /api/admin/students/:id/history
  * View full history of bookings and attendances for an individual student
  */
-router.get('/students/:id/history', (req, res) => {
+router.get('/students/:id/history', async (req, res) => {
   try {
     const studentId = req.params.id;
-    const student = queryOne(
+    const student = await queryOne(
       `SELECT s.*, u.full_name, u.phone, u.email, u.is_active
        FROM students s
        JOIN users u ON s.user_id = u.id
@@ -397,7 +397,7 @@ router.get('/students/:id/history', (req, res) => {
       return res.status(404).json({ success: false, message: 'الطالب غير موجود.' });
     }
 
-    const logs = queryAll(
+    const logs = await queryAll(
       `SELECT 
         b.booking_code, b.date, b.status as booking_status,
         t.departure_time, t.trip_code,
@@ -431,11 +431,11 @@ router.get('/students/:id/history', (req, res) => {
  * GET /api/admin/trips
  * List trips for a given date
  */
-router.get('/trips', (req, res) => {
+router.get('/trips', async (req, res) => {
   try {
     const date = req.query.date || getTodayString();
 
-    const trips = queryAll(
+    const trips = await queryAll(
       `SELECT 
         t.*,
         r.name as route_name, r.start_location, r.end_location, r.direction,
@@ -452,8 +452,8 @@ router.get('/trips', (req, res) => {
       [date]
     );
 
-    const enriched = trips.map((t) => {
-      const finalized = ['COMPLETED', 'CANCELLED'].includes(t.status) || t.date < getTodayString() || !isDateOpen(t.date);
+    const enriched = await Promise.all(trips.map(async (t) => {
+      const finalized = ['COMPLETED', 'CANCELLED'].includes(t.status) || t.date < getTodayString() || !await isDateOpen(t.date);
       const absent = finalized ? Math.max(0, t.booked_seats - t.present_count) : 0;
       return {
         ...t,
@@ -462,7 +462,7 @@ router.get('/trips', (req, res) => {
         pending_count: Math.max(0, t.booked_seats - t.present_count - absent),
         is_full: t.booked_seats >= t.capacity,
       };
-    });
+    }));
 
     return res.json({ success: true, date, trips: enriched });
   } catch (error) {
@@ -475,7 +475,7 @@ router.get('/trips', (req, res) => {
  * POST /api/admin/trips
  * Create new trip
  */
-router.post('/trips', (req, res) => {
+router.post('/trips', async (req, res) => {
   try {
     const { date, departure_time, route_id, vehicle_id, driver_id, capacity } = req.body;
 
@@ -489,11 +489,11 @@ router.post('/trips', (req, res) => {
     if (!isValidDate(date) || timeToMinutes(departure_time) === null || ![routeId, vehicleId, driverId].every((id) => Number.isInteger(id) && id > 0)) {
       return res.status(400).json({ success: false, message: 'التاريخ أو الوقت أو بيانات الرحلة غير صالحة.' });
     }
-    if (!isDateOpen(date)) return res.status(400).json({ success: false, message: 'يجب فتح دورة يوم الرحلة قبل جدولة رحلة جديدة.' });
+    if (!await isDateOpen(date)) return res.status(400).json({ success: false, message: 'يجب فتح دورة يوم الرحلة قبل جدولة رحلة جديدة.' });
 
-    const route = queryOne('SELECT id, estimated_duration_min FROM routes WHERE id = ? AND is_active = 1', [routeId]);
-    const vehicle = queryOne('SELECT id, capacity, driver_id, status FROM vehicles WHERE id = ?', [vehicleId]);
-    const driver = queryOne("SELECT d.id, d.status, u.is_active FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.id = ?", [driverId]);
+    const route = await queryOne('SELECT id, estimated_duration_min FROM routes WHERE id = ? AND is_active = 1', [routeId]);
+    const vehicle = await queryOne('SELECT id, capacity, driver_id, status FROM vehicles WHERE id = ?', [vehicleId]);
+    const driver = await queryOne("SELECT d.id, d.status, u.is_active FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.id = ?", [driverId]);
     if (!route) return res.status(400).json({ success: false, message: 'خط السير غير موجود أو غير نشط.' });
     if (!vehicle || !['AVAILABLE', 'ASSIGNED'].includes(vehicle.status)) return res.status(400).json({ success: false, message: 'المركبة غير متاحة للتشغيل.' });
     if (vehicle.driver_id && vehicle.driver_id !== driverId) return res.status(400).json({ success: false, message: 'السائق المختار لا يطابق السائق المسجل على المركبة.' });
@@ -503,7 +503,7 @@ router.post('/trips', (req, res) => {
     if (!Number.isInteger(tripCapacity) || tripCapacity < 1 || tripCapacity > vehicle.capacity) {
       return res.status(400).json({ success: false, message: `سعة الرحلة يجب أن تكون بين 1 و${vehicle.capacity} مقعداً.` });
     }
-    const conflict = findScheduleConflict({
+    const conflict = await findScheduleConflict({
       date,
       departureTime: departure_time,
       duration: Math.max(1, Number(route.estimated_duration_min) || 45),
@@ -514,7 +514,7 @@ router.post('/trips', (req, res) => {
 
     const tripCode = `TRP-${date.replace(/-/g, '')}-${crypto.randomInt(100000, 1000000)}`;
 
-    const resTrip = run(
+    const resTrip = await run(
       `INSERT INTO trips (trip_code, date, departure_time, route_id, vehicle_id, driver_id, capacity, booked_seats, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'SCHEDULED')`,
       [tripCode, date, departure_time, routeId, vehicleId, driverId, tripCapacity]
@@ -535,16 +535,16 @@ router.post('/trips', (req, res) => {
  * PUT /api/admin/trips/:id
  * Edit an existing trip
  */
-router.put('/trips/:id', (req, res) => {
+router.put('/trips/:id', async (req, res) => {
   try {
     const tripId = Number.parseInt(req.params.id, 10);
     const { departure_time, route_id, vehicle_id, driver_id, capacity } = req.body;
 
     if (!Number.isInteger(tripId) || tripId <= 0) return res.status(400).json({ success: false, message: 'معرف الرحلة غير صالح.' });
-    const existingTrip = queryOne('SELECT id, date, status, booked_seats, route_id, vehicle_id, driver_id, capacity FROM trips WHERE id = ?', [tripId]);
+    const existingTrip = await queryOne('SELECT id, date, status, booked_seats, route_id, vehicle_id, driver_id, capacity FROM trips WHERE id = ?', [tripId]);
     if (!existingTrip) return res.status(404).json({ success: false, message: 'الرحلة غير موجودة.' });
     if (existingTrip.status !== 'SCHEDULED') return res.status(400).json({ success: false, message: 'لا يمكن تعديل رحلة بدأت أو أُغلقت.' });
-    if (!isDateOpen(existingTrip.date)) return res.status(400).json({ success: false, message: 'يجب فتح دورة يوم الرحلة قبل تعديلها.' });
+    if (!await isDateOpen(existingTrip.date)) return res.status(400).json({ success: false, message: 'يجب فتح دورة يوم الرحلة قبل تعديلها.' });
     const resourceChanged = [
       ['route_id', route_id, existingTrip.route_id],
       ['vehicle_id', vehicle_id, existingTrip.vehicle_id],
@@ -559,14 +559,14 @@ router.put('/trips/:id', (req, res) => {
     const nextVehicleId = vehicle_id ? Number.parseInt(vehicle_id, 10) : existingTrip.vehicle_id;
     const nextDriverId = driver_id ? Number.parseInt(driver_id, 10) : existingTrip.driver_id;
     const nextCapacity = capacity === undefined || capacity === '' ? existingTrip.capacity : Number(capacity);
-    const nextDepartureTime = departure_time || queryOne('SELECT departure_time FROM trips WHERE id = ?', [tripId]).departure_time;
+    const nextDepartureTime = departure_time || (await queryOne('SELECT departure_time FROM trips WHERE id = ?', [tripId])).departure_time;
     if (![nextRouteId, nextVehicleId, nextDriverId].every((id) => Number.isInteger(id) && id > 0) || timeToMinutes(nextDepartureTime) === null) {
       return res.status(400).json({ success: false, message: 'بيانات الرحلة غير صالحة.' });
     }
 
-    const route = queryOne('SELECT id, estimated_duration_min FROM routes WHERE id = ? AND is_active = 1', [nextRouteId]);
-    const vehicle = queryOne('SELECT id, capacity, driver_id, status FROM vehicles WHERE id = ?', [nextVehicleId]);
-    const driver = queryOne("SELECT d.id, d.status, u.is_active FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.id = ?", [nextDriverId]);
+    const route = await queryOne('SELECT id, estimated_duration_min FROM routes WHERE id = ? AND is_active = 1', [nextRouteId]);
+    const vehicle = await queryOne('SELECT id, capacity, driver_id, status FROM vehicles WHERE id = ?', [nextVehicleId]);
+    const driver = await queryOne("SELECT d.id, d.status, u.is_active FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.id = ?", [nextDriverId]);
     if (!route || !vehicle || !['AVAILABLE', 'ASSIGNED'].includes(vehicle.status) || !driver || driver.status !== 'ACTIVE' || driver.is_active !== 1) {
       return res.status(400).json({ success: false, message: 'خط السير أو المركبة أو السائق غير متاح.' });
     }
@@ -574,8 +574,8 @@ router.put('/trips/:id', (req, res) => {
     if (!Number.isInteger(nextCapacity) || nextCapacity < existingTrip.booked_seats || nextCapacity > vehicle.capacity) {
       return res.status(400).json({ success: false, message: `السعة يجب أن تكون بين الحجوزات الحالية وسعة المركبة (${vehicle.capacity}).` });
     }
-    const conflict = findScheduleConflict({
-      date: queryOne('SELECT date FROM trips WHERE id = ?', [tripId]).date,
+    const conflict = await findScheduleConflict({
+      date: (await queryOne('SELECT date FROM trips WHERE id = ?', [tripId])).date,
       departureTime: nextDepartureTime,
       duration: Math.max(1, Number(route.estimated_duration_min) || 45),
       vehicleId: nextVehicleId,
@@ -584,7 +584,7 @@ router.put('/trips/:id', (req, res) => {
     });
     if (conflict) return res.status(409).json({ success: false, message: conflict });
 
-    run(
+    await run(
       `UPDATE trips 
        SET departure_time = COALESCE(?, departure_time),
            route_id = COALESCE(?, route_id),
@@ -612,16 +612,16 @@ router.put('/trips/:id', (req, res) => {
 /**
  * Cancel a scheduled trip without deleting its booking history.
  */
-router.post('/trips/:id/cancel', (req, res) => {
+router.post('/trips/:id/cancel', async (req, res) => {
   try {
     const tripId = Number.parseInt(req.params.id, 10);
     if (!Number.isInteger(tripId) || tripId <= 0) return res.status(400).json({ success: false, message: 'معرف الرحلة غير صالح.' });
-    const trip = queryOne('SELECT id, status FROM trips WHERE id = ?', [tripId]);
+    const trip = await queryOne('SELECT id, status FROM trips WHERE id = ?', [tripId]);
     if (!trip) return res.status(404).json({ success: false, message: 'الرحلة غير موجودة.' });
     if (trip.status !== 'SCHEDULED') return res.status(400).json({ success: false, message: 'يمكن إلغاء الرحلات المجدولة فقط. الرحلة التي بدأت لا يمكن إلغاؤها.' });
-    transaction(({ run }) => {
-      run("UPDATE trips SET status = 'CANCELLED' WHERE id = ?", [tripId]);
-      run("UPDATE bookings SET status = 'CANCELLED' WHERE trip_id = ? AND status = 'CONFIRMED'", [tripId]);
+    await transaction(async ({ run }) => {
+      await run("UPDATE trips SET status = 'CANCELLED' WHERE id = ?", [tripId]);
+      await run("UPDATE bookings SET status = 'CANCELLED' WHERE trip_id = ? AND status = 'CONFIRMED'", [tripId]);
     });
     return res.json({ success: true, message: 'تم إلغاء الرحلة وحفظ سجلها.' });
   } catch (error) {
@@ -630,17 +630,17 @@ router.post('/trips/:id/cancel', (req, res) => {
   }
 });
 
-router.delete('/trips/:id', (req, res) => {
+router.delete('/trips/:id', async (req, res) => {
   try {
     const tripId = Number.parseInt(req.params.id, 10);
     const trip = Number.isInteger(tripId) && tripId > 0
-      ? queryOne('SELECT id, status FROM trips WHERE id = ?', [tripId])
+      ? await queryOne('SELECT id, status FROM trips WHERE id = ?', [tripId])
       : null;
     if (!trip) return res.status(404).json({ success: false, message: 'الرحلة غير موجودة.' });
     if (trip.status !== 'SCHEDULED') return res.status(400).json({ success: false, message: 'لا يمكن حذف رحلة بدأت أو اكتملت.' });
-    const bookings = queryOne('SELECT COUNT(id) as count FROM bookings WHERE trip_id = ?', [tripId])?.count || 0;
+    const bookings = Number((await queryOne('SELECT COUNT(id) as count FROM bookings WHERE trip_id = ?', [tripId]))?.count || 0);
     if (bookings > 0) return res.status(409).json({ success: false, message: 'تحتوي الرحلة على حجوزات. ألغِ الرحلة للحفاظ على سجل الركاب.' });
-    run('DELETE FROM trips WHERE id = ?', [tripId]);
+    await run('DELETE FROM trips WHERE id = ?', [tripId]);
     return res.json({ success: true, message: 'تم حذف الرحلة المجدولة.' });
   } catch (error) {
     console.error('Delete trip error:', error);
@@ -655,9 +655,9 @@ router.delete('/trips/:id', (req, res) => {
 /**
  * GET /api/admin/vehicles
  */
-router.get('/vehicles', (req, res) => {
+router.get('/vehicles', async (req, res) => {
   try {
-    const vehicles = queryAll(
+    const vehicles = await queryAll(
       `SELECT v.*, u.full_name as driver_name, u.phone as driver_phone
        FROM vehicles v
        LEFT JOIN drivers d ON v.driver_id = d.id
@@ -674,14 +674,14 @@ router.get('/vehicles', (req, res) => {
 /**
  * POST /api/admin/vehicles
  */
-router.post('/vehicles', (req, res) => {
+router.post('/vehicles', async (req, res) => {
   try {
     const { vehicle_number, plate_number, type, capacity, driver_id, status, notes } = req.body;
     if (!vehicle_number || !plate_number || !capacity) {
       return res.status(400).json({ success: false, message: 'بيانات المركبة الأساسية مطلوبة.' });
     }
 
-    run(
+    await run(
       `INSERT INTO vehicles (vehicle_number, plate_number, type, capacity, driver_id, status, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -706,12 +706,12 @@ router.post('/vehicles', (req, res) => {
  * PUT /api/admin/vehicles/:id
  * Edit an existing vehicle
  */
-router.put('/vehicles/:id', (req, res) => {
+router.put('/vehicles/:id', async (req, res) => {
   try {
     const vehicleId = req.params.id;
     const { vehicle_number, plate_number, type, capacity, driver_id, status, notes } = req.body;
 
-    run(
+    await run(
       `UPDATE vehicles 
        SET vehicle_number = COALESCE(?, vehicle_number),
            plate_number = COALESCE(?, plate_number),
@@ -743,10 +743,10 @@ router.put('/vehicles/:id', (req, res) => {
 /**
  * DELETE /api/admin/vehicles/:id
  */
-router.delete('/vehicles/:id', (req, res) => {
+router.delete('/vehicles/:id', async (req, res) => {
   try {
     const vehicleId = req.params.id;
-    run('DELETE FROM vehicles WHERE id = ?', [vehicleId]);
+    await run('DELETE FROM vehicles WHERE id = ?', [vehicleId]);
     return res.json({ success: true, message: 'تم حذف المركبة بنجاح.' });
   } catch (error) {
     console.error('Delete vehicle error:', error);
@@ -761,9 +761,9 @@ router.delete('/vehicles/:id', (req, res) => {
 /**
  * GET /api/admin/drivers
  */
-router.get('/drivers', (req, res) => {
+router.get('/drivers', async (req, res) => {
   try {
-    const drivers = queryAll(
+    const drivers = await queryAll(
       `SELECT d.*, u.full_name, u.phone, u.email, u.is_active,
               v.id as vehicle_id, v.vehicle_number, v.plate_number
        FROM drivers d
@@ -791,13 +791,13 @@ router.post('/drivers', async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
 
-    transaction(({ run }) => {
-      const uRes = run(
+    await transaction(async ({ run }) => {
+      const uRes = await run(
         `INSERT INTO users (full_name, phone, email, password_hash, role)
          VALUES (?, ?, ?, ?, 'DRIVER')`,
         [full_name.trim(), phone.trim(), email || null, password_hash]
       );
-      run(
+      await run(
         `INSERT INTO drivers (user_id, license_number, experience_years, status)
          VALUES (?, ?, ?, 'ACTIVE')`,
         [uRes.lastInsertRowid, license_number || null, experience_years || 0]
@@ -820,27 +820,27 @@ router.put('/drivers/:id', async (req, res) => {
     const driverId = req.params.id;
     const { full_name, phone, email, license_number, experience_years, status, password } = req.body;
 
-    const driver = queryOne('SELECT user_id FROM drivers WHERE id = ?', [driverId]);
+    const driver = await queryOne('SELECT user_id FROM drivers WHERE id = ?', [driverId]);
     if (!driver) {
       return res.status(404).json({ success: false, message: 'السائق غير موجود.' });
     }
 
     // Check phone uniqueness
     if (phone) {
-      const existing = queryOne('SELECT id FROM users WHERE phone = ? AND id != ?', [phone.trim(), driver.user_id]);
+      const existing = await queryOne('SELECT id FROM users WHERE phone = ? AND id != ?', [phone.trim(), driver.user_id]);
       if (existing) {
         return res.status(409).json({ success: false, message: 'رقم الهاتف مستخدم لحساب آخر.' });
       }
     }
 
-    transaction(({ run }) => {
+    await transaction(async ({ run }) => {
       if (full_name || phone || email !== undefined) {
-        run(
+        await run(
           `UPDATE users 
            SET full_name = COALESCE(?, full_name),
                phone = COALESCE(?, phone),
                email = COALESCE(?, email),
-               updated_at = datetime('now', 'localtime')
+               updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
           [full_name ? full_name.trim() : null, phone ? phone.trim() : null, email !== undefined ? (email ? email.trim() : null) : null, driver.user_id]
         );
@@ -849,10 +849,10 @@ router.put('/drivers/:id', async (req, res) => {
       if (password && password.length >= 6) {
         const salt = bcrypt.genSaltSync(10);
         const hash = bcrypt.hashSync(password, salt);
-        run('UPDATE users SET password_hash = ? WHERE id = ?', [hash, driver.user_id]);
+        await run('UPDATE users SET password_hash = ? WHERE id = ?', [hash, driver.user_id]);
       }
 
-      run(
+      await run(
         `UPDATE drivers 
          SET license_number = COALESCE(?, license_number),
              experience_years = COALESCE(?, experience_years),
@@ -872,15 +872,15 @@ router.put('/drivers/:id', async (req, res) => {
 /**
  * DELETE /api/admin/drivers/:id
  */
-router.delete('/drivers/:id', (req, res) => {
+router.delete('/drivers/:id', async (req, res) => {
   try {
     const driverId = req.params.id;
-    const driver = queryOne('SELECT user_id FROM drivers WHERE id = ?', [driverId]);
+    const driver = await queryOne('SELECT user_id FROM drivers WHERE id = ?', [driverId]);
     if (!driver) {
       return res.status(404).json({ success: false, message: 'السائق غير موجود.' });
     }
 
-    run('DELETE FROM users WHERE id = ?', [driver.user_id]);
+    await run('DELETE FROM users WHERE id = ?', [driver.user_id]);
     return res.json({ success: true, message: 'تم حذف السائق بنجاح.' });
   } catch (error) {
     console.error('Delete driver error:', error);
@@ -895,13 +895,13 @@ router.delete('/drivers/:id', (req, res) => {
 /**
  * GET /api/admin/routes
  */
-router.get('/routes', (req, res) => {
+router.get('/routes', async (req, res) => {
   try {
-    const routes = queryAll('SELECT * FROM routes ORDER BY id DESC');
-    const enriched = routes.map((r) => {
-      const points = queryAll('SELECT * FROM pickup_points WHERE route_id = ? ORDER BY sequence_order ASC', [r.id]);
+    const routes = await queryAll('SELECT * FROM routes ORDER BY id DESC');
+    const enriched = await Promise.all(routes.map(async (r) => {
+      const points = await queryAll('SELECT * FROM pickup_points WHERE route_id = ? ORDER BY sequence_order ASC', [r.id]);
       return { ...r, pickup_points: points };
-    });
+    }));
     return res.json({ success: true, routes: enriched });
   } catch (error) {
     console.error('Routes error:', error);
@@ -912,15 +912,15 @@ router.get('/routes', (req, res) => {
 /**
  * POST /api/admin/routes
  */
-router.post('/routes', (req, res) => {
+router.post('/routes', async (req, res) => {
   try {
     const { name, start_location, end_location, direction, estimated_duration_min, pickup_points } = req.body;
     if (!name || !start_location || !end_location) {
       return res.status(400).json({ success: false, message: 'اسم الخط ومحطات البداية والنهاية مطلوبة.' });
     }
 
-    transaction(({ run }) => {
-      const rRes = run(
+    await transaction(async ({ run }) => {
+      const rRes = await run(
         `INSERT INTO routes (name, start_location, end_location, direction, estimated_duration_min)
          VALUES (?, ?, ?, ?, ?)`,
         [name.trim(), start_location.trim(), end_location.trim(), direction || 'GO', estimated_duration_min || 45]
@@ -928,15 +928,15 @@ router.post('/routes', (req, res) => {
       const routeId = rRes.lastInsertRowid;
 
       if (Array.isArray(pickup_points)) {
-        pickup_points.forEach((p, idx) => {
+        for (const [idx, p] of pickup_points.entries()) {
           if (p.name && p.name.trim()) {
-            run(
+            await run(
               `INSERT INTO pickup_points (route_id, name, sequence_order, expected_time_offset_min, landmark)
                VALUES (?, ?, ?, ?, ?)`,
               [routeId, p.name.trim(), idx + 1, p.expected_time_offset_min || 0, p.landmark || null]
             );
           }
-        });
+        }
       }
     });
 
@@ -951,12 +951,12 @@ router.post('/routes', (req, res) => {
  * PUT /api/admin/routes/:id
  * Edit route details and direction
  */
-router.put('/routes/:id', (req, res) => {
+router.put('/routes/:id', async (req, res) => {
   try {
     const routeId = req.params.id;
     const { name, start_location, end_location, direction, estimated_duration_min, is_active } = req.body;
 
-    run(
+    await run(
       `UPDATE routes 
        SET name = COALESCE(?, name),
            start_location = COALESCE(?, start_location),
@@ -986,10 +986,10 @@ router.put('/routes/:id', (req, res) => {
 /**
  * DELETE /api/admin/routes/:id
  */
-router.delete('/routes/:id', (req, res) => {
+router.delete('/routes/:id', async (req, res) => {
   try {
     const routeId = req.params.id;
-    run('DELETE FROM routes WHERE id = ?', [routeId]);
+    await run('DELETE FROM routes WHERE id = ?', [routeId]);
     return res.json({ success: true, message: 'تم حذف الخط وكافة محطاته بنجاح.' });
   } catch (error) {
     console.error('Delete route error:', error);
@@ -1001,7 +1001,7 @@ router.delete('/routes/:id', (req, res) => {
  * POST /api/admin/routes/:id/pickup-points
  * Add a pickup point to a route
  */
-router.post('/routes/:id/pickup-points', (req, res) => {
+router.post('/routes/:id/pickup-points', async (req, res) => {
   try {
     const routeId = req.params.id;
     const { name, expected_time_offset_min, landmark } = req.body;
@@ -1010,12 +1010,12 @@ router.post('/routes/:id/pickup-points', (req, res) => {
       return res.status(400).json({ success: false, message: 'اسم محطة الركوب مطلوب.' });
     }
 
-    const maxSeq = queryOne(
+    const maxSeq = Number((await queryOne(
       'SELECT COALESCE(MAX(sequence_order), 0) as max_seq FROM pickup_points WHERE route_id = ?',
       [routeId]
-    )?.max_seq || 0;
+    ))?.max_seq || 0);
 
-    const resPoint = run(
+    const resPoint = await run(
       `INSERT INTO pickup_points (route_id, name, sequence_order, expected_time_offset_min, landmark)
        VALUES (?, ?, ?, ?, ?)`,
       [routeId, name.trim(), maxSeq + 1, expected_time_offset_min || 0, landmark || null]
@@ -1036,12 +1036,12 @@ router.post('/routes/:id/pickup-points', (req, res) => {
  * PUT /api/admin/pickup-points/:id
  * Edit pickup point
  */
-router.put('/pickup-points/:id', (req, res) => {
+router.put('/pickup-points/:id', async (req, res) => {
   try {
     const pointId = req.params.id;
     const { name, sequence_order, expected_time_offset_min, landmark } = req.body;
 
-    run(
+    await run(
       `UPDATE pickup_points 
        SET name = COALESCE(?, name),
            sequence_order = COALESCE(?, sequence_order),
@@ -1067,10 +1067,10 @@ router.put('/pickup-points/:id', (req, res) => {
 /**
  * DELETE /api/admin/pickup-points/:id
  */
-router.delete('/pickup-points/:id', (req, res) => {
+router.delete('/pickup-points/:id', async (req, res) => {
   try {
     const pointId = req.params.id;
-    run('DELETE FROM pickup_points WHERE id = ?', [pointId]);
+    await run('DELETE FROM pickup_points WHERE id = ?', [pointId]);
     return res.json({ success: true, message: 'تم حذف محطة الركوب بنجاح.' });
   } catch (error) {
     console.error('Delete pickup point error:', error);
@@ -1086,7 +1086,7 @@ router.delete('/pickup-points/:id', (req, res) => {
  * GET /api/admin/reports/attendance
  * Detailed report with date, route, and status filters
  */
-router.get('/reports/attendance', (req, res) => {
+router.get('/reports/attendance', async (req, res) => {
   try {
     const { date, start_date, end_date, route_id, status } = req.query;
 
@@ -1138,7 +1138,7 @@ router.get('/reports/attendance', (req, res) => {
 
     sql += ' ORDER BY b.date DESC, t.departure_time DESC, u.full_name ASC';
 
-    const records = queryAll(sql, params);
+    const records = await queryAll(sql, params);
 
     return res.json({
       success: true,
@@ -1162,9 +1162,9 @@ router.get('/reports/attendance', (req, res) => {
 /**
  * GET /api/admin/settings
  */
-router.get('/settings', (req, res) => {
+router.get('/settings', async (req, res) => {
   try {
-    const rows = queryAll('SELECT key, value FROM settings');
+    const rows = await queryAll('SELECT key, value FROM settings');
     const settingsObj = {};
     rows.forEach((r) => {
       settingsObj[r.key] = r.value;
@@ -1179,7 +1179,7 @@ router.get('/settings', (req, res) => {
 /**
  * PUT /api/admin/settings
  */
-router.put('/settings', (req, res) => {
+router.put('/settings', async (req, res) => {
   try {
     const settings = req.body;
     const allowedKeys = new Set([
@@ -1214,9 +1214,13 @@ router.put('/settings', (req, res) => {
       }
     }
 
-    transaction(({ run }) => {
+    await transaction(async ({ run }) => {
       for (const [key, value] of entries) {
-        run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, String(value).trim()]);
+        await run(
+          `INSERT INTO settings (key, value) VALUES (?, ?)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [key, String(value).trim()]
+        );
       }
     });
     return res.json({ success: true, message: 'تم حفظ إعدادات النظام بنجاح.' });
